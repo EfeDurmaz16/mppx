@@ -1,5 +1,15 @@
 # mppx
 
+## 0.8.13
+
+### Patch Changes
+
+- d807f92: Improved agent environment detection for automatic JSON validate output.
+
+  Added SDK guidance when validate could not find an OpenAPI discovery document.
+
+- 2ff74a5: Fixed server method handlers to require request fields that were not configured as defaults, and exposed Tempo's resolved currency and decimals as defaults.
+
 ## 0.8.12
 
 ### Patch Changes
