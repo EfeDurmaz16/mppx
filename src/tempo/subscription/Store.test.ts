@@ -196,6 +196,71 @@ describe('tempo subscription store', () => {
     expect((await store.getByKey('user-1:plan:pro'))?.subscriptionId).toBe(subscriptionId)
   })
 
+  test.each([
+    {
+      failureKey: `tempo:subscription:record:${subscriptionId}`,
+      label: 'subscription record',
+      recordPersisted: false,
+    },
+    {
+      failureKey: 'tempo:subscription:key:user-1:plan:pro',
+      label: 'lookup index',
+      recordPersisted: true,
+    },
+  ])(
+    'leaves activation permanently in flight when the $label write fails',
+    async ({ failureKey, recordPersisted }) => {
+      const rawStore = Store.memory()
+      let failWrite = true
+      const faultingStore = {
+        ...rawStore,
+        async put(key, value) {
+          if (failWrite && key === failureKey) {
+            failWrite = false
+            throw new Error(`simulated process exit before writing ${key}`)
+          }
+          await rawStore.put(key, value)
+        },
+      } satisfies Store.AtomicStore<Record<string, unknown>>
+      const store = fromStore(faultingStore, { activationTimeoutMs: 0 })
+
+      await expect(
+        store.activate({
+          challengeId: 'challenge-1',
+          create: async () => ({ subscription: createRecord() }),
+          lookupKey: 'user-1:plan:pro',
+        }),
+      ).rejects.toThrow('simulated process exit')
+
+      expect(await rawStore.get('tempo:subscription:activation:user-1:plan:pro')).toMatchObject({
+        challengeId: 'challenge-1',
+        committingAt: expect.any(String),
+      })
+
+      const restartedStore = fromStore(rawStore, { activationTimeoutMs: 0 })
+      let createCalled = false
+      for (const challengeId of ['challenge-2', 'challenge-3']) {
+        const retried = await restartedStore.activate({
+          challengeId,
+          create: async () => {
+            createCalled = true
+            return { subscription: createRecord({ subscriptionId: 'sub_2' }) }
+          },
+          lookupKey: 'user-1:plan:pro',
+        })
+        expect(retried).toEqual({ status: 'inFlight' })
+      }
+
+      expect(createCalled).toBe(false)
+      expect(Boolean(await restartedStore.get(subscriptionId))).toBe(recordPersisted)
+      expect(await restartedStore.getByKey('user-1:plan:pro')).toBeNull()
+      expect(await rawStore.get('tempo:subscription:activation:user-1:plan:pro')).toMatchObject({
+        challengeId: 'challenge-1',
+        committingAt: expect.any(String),
+      })
+    },
+  )
+
   test('keeps a superseded activation record for reconciliation', async () => {
     const store = fromStore(Store.memory(), { activationTimeoutMs: 0 })
     let finishActivation!: () => void
