@@ -738,7 +738,53 @@ describe('precompile server session unit guardrails', () => {
     expect(request.sessionSnapshot).toMatchObject({
       channelId: openPayload.channelId,
       descriptor: openPayload.descriptor,
-      requiredCumulative: '201',
+      requiredCumulative: '251',
+      spent: '200',
+    })
+  })
+
+  test('request advances reusable content hints by the configured minimum voucher delta', async () => {
+    const openPayload = await createOpenPayload({ initialAmount: 100n })
+    const highestVoucher = await ClientOps.createVoucherPayload(
+      createSigningClient(),
+      payer,
+      openPayload.descriptor,
+      Types.uint96(250n),
+      chainId,
+    )
+    if (highestVoucher.action !== 'voucher') throw new Error('expected voucher payload')
+    const { method, store } = createServer({ minVoucherDelta: '5' })
+    await persistPrecompileChannel(store, openPayload, {
+      highestVoucherAmount: 250n,
+      highestVoucher: {
+        channelId: openPayload.channelId,
+        cumulativeAmount: 250n,
+        signature: highestVoucher.signature,
+      },
+      spent: 200n,
+    })
+
+    const request = await method.request!({
+      capturedRequest: {
+        hasBody: false,
+        headers: new Headers(),
+        method: 'GET',
+        url: new URL('https://api.example.com/resource'),
+      },
+      credential: null,
+      request: {
+        amount: '1',
+        channelId: openPayload.channelId,
+        currency: token,
+        decimals: 0,
+        recipient: payee,
+        unitType: 'request',
+      },
+    } as never)
+
+    expect(request.sessionSnapshot).toMatchObject({
+      acceptedCumulative: '250',
+      requiredCumulative: '255',
       spent: '200',
     })
   })
@@ -2110,7 +2156,8 @@ describe('precompile server session unit guardrails', () => {
       const store = channelStore(rawStore)
       const openPayload = await createOpenPayload({ initialAmount: 1n })
       await persistPrecompileChannel(store, openPayload, {
-        highestVoucherAmount: 1n,
+        highestVoucherAmount: 0n,
+        highestVoucher: null,
         spent: 0n,
         units: 0,
       })
@@ -2170,11 +2217,100 @@ describe('precompile server session unit guardrails', () => {
       expect(replay.headers.get('Payment-Receipt')).toBeNull()
     })
 
+    test('an overfunded voucher authorizes only the request that advances it', async () => {
+      const rawStore = Store.memory()
+      const store = channelStore(rawStore)
+      const openPayload = await createOpenPayload({ initialAmount: 1n })
+      await persistPrecompileChannel(store, openPayload, {
+        spent: 0n,
+        units: 0,
+      })
+      const route = createRoute(rawStore)
+      const voucher = await ClientOps.createVoucherPayload(
+        createSigningClient(),
+        payer,
+        openPayload.descriptor,
+        Types.uint96(10n),
+        chainId,
+      )
+
+      for (let request = 1; request <= 3; request++) {
+        const challenge = await route(new Request('https://api.example.com/resource'))
+        expect(challenge.status).toBe(402)
+        if (challenge.status !== 402) throw new Error('expected challenge')
+
+        const paid = await route(
+          new Request('https://api.example.com/resource', {
+            headers: {
+              Authorization: Credential.serialize({
+                challenge: Challenge.fromResponse(challenge.challenge),
+                payload: voucher,
+                source: sourceFor(),
+              }),
+            },
+          }),
+        )
+        expect(paid.status).toBe(request === 1 ? 200 : 402)
+      }
+
+      expect(await store.getChannel(openPayload.channelId)).toMatchObject({
+        highestVoucherAmount: 10n,
+        spent: 1n,
+        units: 1,
+      })
+    })
+
+    test.each([undefined, 'reused-request'])(
+      'rejects exact copied authorization replays with idempotency key %s',
+      async (idempotencyKey) => {
+        const rawStore = Store.memory()
+        const store = channelStore(rawStore)
+        const openPayload = await createOpenPayload({ initialAmount: 1n })
+        await persistPrecompileChannel(store, openPayload, {
+          spent: 0n,
+          units: 0,
+        })
+        const route = createRoute(rawStore)
+        const voucher = await ClientOps.createVoucherPayload(
+          createSigningClient(),
+          payer,
+          openPayload.descriptor,
+          Types.uint96(10n),
+          chainId,
+        )
+        const challenge = await route(new Request('https://api.example.com/resource'))
+        expect(challenge.status).toBe(402)
+        if (challenge.status !== 402) throw new Error('expected challenge')
+        const authorization = Credential.serialize({
+          challenge: Challenge.fromResponse(challenge.challenge),
+          payload: voucher,
+          source: sourceFor(),
+        })
+
+        for (let request = 1; request <= 3; request++) {
+          const paid = await route(
+            new Request('https://api.example.com/resource', {
+              headers: {
+                Authorization: authorization,
+                ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
+              },
+            }),
+          )
+          expect(paid.status).toBe(request === 1 ? 200 : 402)
+        }
+
+        expect(await store.getChannel(openPayload.channelId)).toMatchObject({ spent: 1n, units: 1 })
+      },
+    )
+
     test('POST content flow charges once and rejects same-voucher replay', async () => {
       const rawStore = Store.memory()
       const store = channelStore(rawStore)
       const openPayload = await createOpenPayload({ initialAmount: 1n })
-      await persistPrecompileChannel(store, openPayload)
+      await persistPrecompileChannel(store, openPayload, {
+        highestVoucherAmount: 0n,
+        highestVoucher: null,
+      })
       const route = createRoute(rawStore)
       const voucher = await ClientOps.createVoucherPayload(
         createSigningClient(),
