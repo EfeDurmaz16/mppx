@@ -193,6 +193,7 @@ export type VerifyCredentialOptions = {
   capturedRequest?: Method.CapturedRequest | undefined
   meta?: Record<string, string> | undefined
   realm?: string | undefined
+  /** Route input used for binding checks and disambiguating configured methods before schema transforms. */
   request?: Record<string, unknown> | undefined
   /** Optional expected route/resource scope bound via challenge `opaque`. */
   scope?: string | undefined
@@ -235,7 +236,8 @@ export type Mppx<
        * all methods through HTTP headers or an MCP payment-required challenge list.
        *
        * Each entry is a `[method, options]` tuple where `method` is one of the
-       * server methods passed to `Mppx.create()`, looked up by `name`+`intent`.
+       * server methods passed to `Mppx.create()`, looked up by object identity.
+       * String keys use the named handler; function references use their configured method.
        *
        * Available on HTTP, MCP JSON-RPC, and MCP SDK transports. MCP handlers
        * accept the transport's input and return its challenge and receipt types.
@@ -532,23 +534,11 @@ export function create<
     : undefined
 
   const handlers: Record<string, unknown> = {}
+  const methodHandlers = new Map<Method.AnyServer, AnyMethodFn>()
   const intentCount: Record<string, number> = {}
 
   for (const mi of methods) {
     intentCount[mi.intent] = (intentCount[mi.intent] ?? 0) + 1
-    if (mi.onPaymentSuccess) {
-      serverEvents.on('payment.success', (async (ctx: PaymentSuccessContext) => {
-        if (ctx.method.name === mi.name && ctx.method.intent === mi.intent) {
-          await mi.onPaymentSuccess({
-            challenge: ctx.challenge,
-            input: ctx.input,
-            receipt: ctx.receipt,
-            request: ctx.request,
-            ...(ctx.requestInput !== undefined && { requestInput: ctx.requestInput }),
-          })
-        }
-      }) as never)
-    }
   }
   assertNoReservedMppxKeys(methods as readonly Method.AnyServer[])
 
@@ -574,6 +564,8 @@ export function create<
     const wireKey = `${mi.name}/${mi.intent}`
     const aliasKey = mi.alias ? `${mi.name}/${mi.alias}` : undefined
     if (mi.extensions) Object.assign(fn, mi.extensions)
+    Object.assign(fn, { _method: mi })
+    methodHandlers.set(mi, fn as AnyMethodFn)
     if (!aliasKey || !handlers[wireKey]) handlers[wireKey] = fn
     if (aliasKey) handlers[aliasKey] = fn
   }
@@ -593,8 +585,7 @@ export function create<
       )
       handlers[mi.intent] = (options: Record<string, unknown>) => {
         const configured = intentMethods.map((m) => {
-          const key = `${m.name}/${m.intent}`
-          const handlerFn = handlers[key] as AnyMethodFn
+          const handlerFn = methodHandlers.get(m)!
           return handlerFn(options)
         })
         return composeHandlers(
@@ -611,7 +602,6 @@ export function create<
     if (!handlers[mi.name]) handlers[mi.name] = {}
     const key = mi.alias ? `${mi.name}/${mi.alias}` : `${mi.name}/${mi.intent}`
     const fn = handlers[key] as AnyMethodFn & { _method?: Method.AnyServer }
-    fn._method = mi
     ;(handlers[mi.name] as Record<string, unknown>)[mi.alias ?? mi.intent] = fn
   }
 
@@ -643,7 +633,7 @@ export function create<
     const methodCandidates = (methods as readonly Method.AnyServer[]).filter(
       (m) => m.name === credMethod && m.intent === credIntent,
     )
-    const mi = methodCandidates[0]
+    let mi = methodCandidates[0]
     const eventMethod =
       mi ?? ({ intent: credIntent, name: credMethod } satisfies ServerMethodDescriptor)
 
@@ -697,14 +687,6 @@ export function create<
       )
     }
 
-    if (parameters.requireValidate && !mi.validate)
-      await fail(
-        new Errors.VerificationFailedError({
-          details: { intent: credIntent, method: credMethod },
-          reason: `${credMethod}/${credIntent} does not support non-mutating credential validation`,
-        }),
-      )
-
     if (!Challenge.verify(credential.challenge, { secretKey: secretKey! })) {
       await fail(
         new Errors.InvalidChallengeError({
@@ -720,6 +702,35 @@ export function create<
       if (e instanceof Errors.PaymentError) await fail(e)
       throw e
     }
+
+    if (methodCandidates.length > 1) {
+      const matches = [
+        ...new Set(
+          methodCandidates.filter((candidate) =>
+            matchesStandaloneMethod(candidate, credential.challenge.request, options?.request),
+          ),
+        ),
+      ]
+      if (matches.length !== 1)
+        await fail(
+          new Errors.InvalidChallengeError({
+            id: credential.challenge.id,
+            reason:
+              matches.length === 0
+                ? 'no configured method matches the challenge request'
+                : 'multiple configured methods match the challenge request; use a configured route handler',
+          }),
+        )
+      mi = matches[0]!
+    }
+
+    if (parameters.requireValidate && !mi.validate)
+      await fail(
+        new Errors.VerificationFailedError({
+          details: { intent: credIntent, method: credMethod },
+          reason: `${credMethod}/${credIntent} does not support non-mutating credential validation`,
+        }),
+      )
 
     let parsedCredential!: Credential.Credential
     try {
@@ -893,6 +904,7 @@ export function create<
         request: parsedRequest,
         ...(requestInput !== undefined && { requestInput }),
       }) as never,
+      mi,
     )
 
     return receipt
@@ -911,19 +923,29 @@ export function create<
       throw new Error('compose() only supports HTTP and MCP transports')
     if (entries.length === 0) throw new Error('compose() requires at least one entry')
     const configured = entries.map(([methodOrKey, options]) => {
+      const method =
+        typeof methodOrKey === 'string'
+          ? undefined
+          : typeof methodOrKey === 'function'
+            ? methodOrKey._method
+            : methodOrKey
       const key =
         typeof methodOrKey === 'string'
           ? methodOrKey
-          : typeof methodOrKey === 'function' && '_method' in methodOrKey
-            ? `${(methodOrKey._method as Method.AnyServer).name}/${(methodOrKey._method as Method.AnyServer).alias ?? (methodOrKey._method as Method.AnyServer).intent}`
-            : `${(methodOrKey as Method.AnyServer).name}/${(methodOrKey as Method.AnyServer).alias ?? (methodOrKey as Method.AnyServer).intent}`
-      const handlerFn = handlers[key] as AnyMethodFn | undefined
+          : `${method!.name}/${method!.alias ?? method!.intent}`
+      const handlerFn = method
+        ? methodHandlers.get(method)
+        : (handlers[key] as AnyMethodFn | undefined)
       if (!handlerFn)
         throw new Error(`No handler for "${key}". Is this method in your methods array?`)
-      const method = (handlerFn as AnyMethodFnWithMethod)._method
-      if (isMcp && method?.transport && method.transport.name !== transport.name)
+      const configuredMethod = (handlerFn as AnyMethodFnWithMethod)._method
+      if (
+        isMcp &&
+        configuredMethod?.transport &&
+        configuredMethod.transport.name !== transport.name
+      )
         throw new Error('MCP compose() requires methods using the configured MCP transport')
-      if (isMcp && method?.canOffer)
+      if (isMcp && configuredMethod?.canOffer)
         throw new Error('MCP compose() does not support HTTP canOffer hooks')
       return handlerFn(options)
     })
@@ -1306,6 +1328,7 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
                   request: parsedRequest,
                   requestInput: request,
                 }) as never,
+                method,
               )
               return success(authorized.receipt, {
                 managementResponse: authorized.response,
@@ -1543,6 +1566,7 @@ function createMethodFn(parameters: createMethodFn.Parameters): createMethodFn.R
           request: parsedRequest,
           requestInput: request,
         }) as never,
+        method,
       )
 
       return success(receiptData, {
@@ -1672,6 +1696,7 @@ type ServerEventDispatcher<
   emit<name extends keyof ServerEventMap<methods, transport>>(
     name: name,
     context: ServerEventMap<methods, transport>[name],
+    method?: Method.AnyServer,
   ): Promise<void>
   on<name extends ServerEventName<methods, transport>>(
     name: name,
@@ -1679,6 +1704,7 @@ type ServerEventDispatcher<
   ): Unsubscribe
 }
 
+/** Dispatches instance events and scopes success hooks to the supplied configured method. */
 function createServerEventDispatcher<
   methods extends readonly Method.Method[],
   transport extends Transport.AnyTransport,
@@ -1704,7 +1730,21 @@ function createServerEventDispatcher<
   }
 
   return {
-    async emit(name, context) {
+    async emit(name, context, method) {
+      if (name === 'payment.success' && method?.onPaymentSuccess) {
+        const success = context as PaymentSuccessContext
+        try {
+          await method.onPaymentSuccess({
+            challenge: success.challenge,
+            input: success.input,
+            receipt: success.receipt,
+            request: success.request,
+            ...(success.requestInput !== undefined && { requestInput: success.requestInput }),
+          })
+        } catch {
+          // Per-method hooks are isolated just like instance event handlers.
+        }
+      }
       await emitServerEventHandlers(handlers[name], context)
       await emitServerEventHandlers(handlers['*'], toServerEventEnvelope(name, context))
     },
@@ -2223,6 +2263,36 @@ function getPinnedChallengeMismatch(
     expectedChallenge.request as Record<string, unknown>,
     actualChallenge.request as Record<string, unknown>,
   )
+}
+
+/** Matches standalone credentials against the configured portion of a method's stable binding. */
+function matchesStandaloneMethod(
+  method: Method.AnyServer,
+  request: Record<string, unknown>,
+  routeRequest?: Record<string, unknown>,
+): boolean {
+  try {
+    const configured = { ...method.defaults, ...routeRequest }
+    const parsed = method.schema.request.safeParse(configured)
+    // Standalone callers may omit route-only inputs such as amount. In that
+    // case, constrain selection by the defaults we have rather than parsing
+    // the echoed wire request as input and applying its transforms twice.
+    const expectedRequest = parsed.success ? parsed.data : configured
+    const binding = (value: Record<string, unknown>) => {
+      if (method.stableBinding) return getStableBinding(value, method.stableBinding as never)
+      const { coreBinding, methodBinding } = getPinnedRequestBinding(value)
+      return { ...coreBinding, ...methodBinding }
+    }
+    const expected = binding(expectedRequest)
+    const actual = binding(request)
+    return Object.entries(expected).every(
+      ([key, value]) =>
+        value === undefined ||
+        isDeepStrictEqual(normalizeComparable(value), normalizeComparable(actual[key])),
+    )
+  } catch {
+    return false
+  }
 }
 
 function getPinnedRequestBindingMismatch(
