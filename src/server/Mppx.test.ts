@@ -21,6 +21,7 @@ const realm = 'api.example.com'
 const secretKey = 'test-secret-key-test-secret-key-32'
 
 const method = tempo({
+  chainId: client.chain.id,
   getClient: () => client,
   account: accounts[0],
 })
@@ -6602,6 +6603,7 @@ describe('verifyCredential', () => {
       methods: [
         tempo.charge({
           account: accounts[0],
+          chainId: client.chain.id,
           currency: asset,
           getClient: () => client,
         }),
@@ -6645,6 +6647,7 @@ describe('verifyCredential', () => {
       methods: [
         tempo.charge({
           account: accounts[0],
+          chainId: client.chain.id,
           currency: asset,
           feePayer: true,
           getClient: () => client,
@@ -6820,6 +6823,7 @@ describe('verifyCredential', () => {
       methods: [
         tempo.charge({
           account: accounts[0],
+          chainId: client.chain.id,
           currency: asset,
           feePayer: true,
           getClient: () => client,
@@ -6855,6 +6859,7 @@ describe('verifyCredential', () => {
       methods: [
         tempo.charge({
           account: accounts[0],
+          chainId: client.chain.id,
           currency: asset,
           feePayer: true,
           getClient: () => client,

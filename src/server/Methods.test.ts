@@ -7,7 +7,7 @@ const recipient = '0x0000000000000000000000000000000000000001'
 
 describe('Tempo machine token', () => {
   test('applies the global option only to charge', () => {
-    const direct = tempo.charge({ machineTokenEnabled: true })
+    const [direct] = tempo.charge({ machineTokenEnabled: true })
     const [globalCharge, globalSession] = tempo({ machineTokenEnabled: true })
 
     expect((direct.defaults as { machineTokenEnabled?: boolean }).machineTokenEnabled).toBe(true)
@@ -18,7 +18,7 @@ describe('Tempo machine token', () => {
   })
 
   test('rejects MACH as a direct charge currency', async () => {
-    const method = tempo.charge({
+    const [method] = tempo.charge({
       getClient: () => ({ chain: { id: 42431 } }) as never,
     })
 
@@ -56,7 +56,7 @@ describe('composable method hooks', () => {
       }),
     ]
 
-    for (const method of methods) expect(method.canOffer).toBe(canOffer)
+    for (const method of methods.flat()) expect(method.canOffer).toBe(canOffer)
   })
 
   test('Tempo common constructor forwards canOffer to every intent', () => {
@@ -64,8 +64,8 @@ describe('composable method hooks', () => {
     const methods = tempo({ account: accounts[0], canOffer })
 
     expect(tempo.common).toBe(tempo)
-    expect(methods).toHaveLength(2)
-    for (const method of methods) expect(method.canOffer).toBe(canOffer)
+    expect(methods).toHaveLength(4)
+    for (const method of methods.flat()) expect(method.canOffer).toBe(canOffer)
   })
 
   test('provider convenience constructors preserve canOffer', async () => {

@@ -20,6 +20,7 @@ const secretKey = 'test-secret-key-test-secret-key-32'
 const server = Mppx_server.create({
   methods: [
     tempo_server({
+      chainId: client.chain.id,
       getClient: () => client,
       account: accounts[0],
     }),
@@ -191,6 +192,7 @@ describe('Fetch.from', () => {
     const serverWithFeePayer = Mppx_server.create({
       methods: [
         tempo_server.charge({
+          chainId: chain.id,
           feePayer: accounts[0],
           getClient: () => client,
         }),
@@ -257,6 +259,7 @@ describe('Fetch.from', () => {
     const serverWithFeePayer = Mppx_server.create({
       methods: [
         tempo_server.charge({
+          chainId: chain.id,
           feePayer: accounts[0],
           getClient: () => client,
         }),
