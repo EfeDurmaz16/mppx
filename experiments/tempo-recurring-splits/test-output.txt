@@ -1,0 +1,26 @@
+PASS expected Tempo v1.15.0 build
+PASS expected chain ID 1337
+PASS TIP20 has six decimals
+PASS platform receive policy rejects payer
+PASS CreditMismatch(address,uint256,uint256) revert selector
+PASS CreditMismatch(address,uint256,uint256) preserves balances, allowance, paid marker
+PASS second leg fails on zero actual platform credit
+PASS trace proves first leg credited before outer revert
+PASS reverted payment commits no payout or hold logs
+PASS unsafe control pays creator but holds platform share
+PASS mutation detected: success does not imply atomic delivery
+PASS control emits one TransferBlocked
+PASS reverted hold did not consume guard nonce
+PASS held receipt preserves exact control entitlement
+PASS same period retry pays exact 8/2
+PASS AlreadyPaid() revert selector
+PASS AlreadyPaid() preserves balances, allowance, paid marker
+PASS Terms() revert selector
+PASS Terms() preserves balances, allowance, paid marker
+PASS relayer cannot cancel payer authorization
+PASS Inactive() revert selector
+PASS Inactive() preserves balances, allowance, paid marker
+PASS Inactive() revert selector
+PASS Inactive() preserves balances, allowance, paid marker
+PASS later period can renew with exact shares
+All 25 checks passed; evidence: results.json
