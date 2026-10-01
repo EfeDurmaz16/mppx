@@ -38,9 +38,16 @@ const subscriptionAccessKey = z.object({
   keyType: z.enum(['p256', 'secp256k1', 'webAuthn']),
 })
 
+const subscriptionSplit = z.object({ amount: z.amount(), recipient: normalizedAddress })
+const subscriptionRawSplit = z.object({
+  amount: z.string().check(z.regex(/^[1-9]\d*$/, 'Invalid raw split amount')),
+  recipient: normalizedAddress,
+})
+
 const subscriptionMethodDetails = z.object({
   accessKey: z.optional(subscriptionAccessKey),
   chainId: z.optional(z.number()),
+  splits: z.optional(z.array(subscriptionRawSplit).check(z.minLength(1), z.maxLength(10))),
 })
 
 const subscriptionExpires = z
@@ -346,22 +353,48 @@ export const subscription = Method.from({
           periodCount: uint64String,
           periodUnit: subscriptionPeriodUnit,
           recipient: normalizedAddress,
+          splits: z.optional(z.array(subscriptionSplit).check(z.minLength(1), z.maxLength(10))),
           subscriptionExpires,
         })
         .check(
           positiveParsedAmount('Subscription amount must be greater than 0'),
           z.refine(subscriptionPeriodFitsUint64, 'Subscription period exceeds uint64'),
+          z.refine(({ amount, decimals, recipient, splits, methodDetails }) => {
+            if (splits && methodDetails?.splits) return false
+            const allocations = splits?.map((split) => ({
+              ...split,
+              amount: parseUnits(split.amount, decimals),
+            })) ?? methodDetails?.splits?.map((split) => ({
+              ...split,
+              amount: BigInt(split.amount),
+            }))
+            if (!allocations) return true
+            const recipients = allocations.map((split) => split.recipient)
+            return (
+              allocations.every((split) => split.amount > 0n) &&
+              allocations.reduce((sum, split) => sum + split.amount, 0n) < parseUnits(amount, decimals) &&
+              !recipients.includes(recipient) &&
+              new Set(recipients).size === recipients.length
+            )
+          }, 'Invalid subscription splits'),
         ),
       z.transform(
-        ({ accessKey, amount, chainId, decimals, methodDetails, subscriptionExpires, ...rest }) => {
+        ({ accessKey, amount, chainId, decimals, methodDetails, splits, subscriptionExpires, ...rest }) => {
           // Accept top-level convenience input, but serialize Tempo-specific fields under methodDetails.
           const nextMethodDetails: {
             accessKey?: z.infer<typeof subscriptionAccessKey> | undefined
             chainId?: number | undefined
+            splits?: z.infer<typeof subscriptionRawSplit>[] | undefined
           } = {
             ...methodDetails,
             ...(accessKey !== undefined && { accessKey }),
             ...(chainId !== undefined && { chainId }),
+            ...(splits !== undefined && {
+              splits: splits.map((split) => ({
+                ...split,
+                amount: parseUnits(split.amount, decimals).toString(),
+              })),
+            }),
           }
 
           return {

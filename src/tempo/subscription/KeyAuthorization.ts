@@ -112,22 +112,21 @@ export function assertSubscriptionTiming(parameters: {
 
 /** Builds the Tempo access-key call scopes required for a subscription payment. */
 export function getSubscriptionScopes(
-  request: Pick<SubscriptionRequest, 'currency' | 'recipient'>,
+  request: Pick<SubscriptionRequest, 'currency' | 'recipient' | 'methodDetails'>,
 ) {
   const currency = normalizeAddress(request.currency, 'currency')
-  const recipient = normalizeAddress(request.recipient, 'recipient')
   return [
     {
       address: currency,
       selector: transferWithMemoSelector,
-      recipients: [recipient],
+      recipients: getSubscriptionRecipients(request),
     },
   ] as const
 }
 
 /** Builds the RPC `allowedCalls` payload passed to `wallet_authorizeAccessKey`. */
 export function getSubscriptionRpcAllowedCalls(
-  request: Pick<SubscriptionRequest, 'currency' | 'recipient'>,
+  request: Pick<SubscriptionRequest, 'currency' | 'recipient' | 'methodDetails'>,
 ) {
   const [transferWithMemo] = getSubscriptionScopes(request)
   return [
@@ -167,7 +166,7 @@ export async function signSubscriptionKeyAuthorization(parameters: {
   chainId: number
   request: Pick<
     SubscriptionRequest,
-    'amount' | 'currency' | 'periodCount' | 'periodUnit' | 'recipient' | 'subscriptionExpires'
+    'amount' | 'currency' | 'methodDetails' | 'periodCount' | 'periodUnit' | 'recipient' | 'subscriptionExpires'
   >
 }) {
   const { accessKey, account, challengeId, chainId, request } = parameters
@@ -240,7 +239,7 @@ function createUnsignedAuthorization(parameters: {
   chainId: number
   request: Pick<
     SubscriptionRequest,
-    'amount' | 'currency' | 'periodCount' | 'periodUnit' | 'recipient' | 'subscriptionExpires'
+    'amount' | 'currency' | 'methodDetails' | 'periodCount' | 'periodUnit' | 'recipient' | 'subscriptionExpires'
   >
 }) {
   const { accessKey, challengeId, chainId, request } = parameters
@@ -348,7 +347,7 @@ function assertAuthorizationLimit(
 
 function assertAuthorizationScopes(
   scopes: readonly KeyAuthorization.Scope[] | undefined,
-  request: Pick<SubscriptionRequest, 'currency' | 'recipient'>,
+  request: Pick<SubscriptionRequest, 'currency' | 'recipient' | 'methodDetails'>,
 ) {
   if (!scopes || scopes.length !== 1) {
     throw new VerificationFailedError({
@@ -357,7 +356,7 @@ function assertAuthorizationScopes(
   }
 
   const currency = normalizeAddress(request.currency, 'currency')
-  const recipient = normalizeAddress(request.recipient, 'recipient')
+  const recipients = getSubscriptionRecipients(request)
   const seen = new Set<string>()
 
   for (const scope of scopes) {
@@ -373,7 +372,13 @@ function assertAuthorizationScopes(
     }
     seen.add(selector)
 
-    if (scope.recipients?.length !== 1 || !isAddressEqual(scope.recipients[0]!, recipient)) {
+    const actual = scope.recipients?.map((recipient) => normalizeAddress(recipient, 'recipient'))
+    if (
+      !actual ||
+      actual.length !== recipients.length ||
+      new Set(actual).size !== actual.length ||
+      actual.some((recipient) => !recipients.includes(recipient))
+    ) {
       throw new VerificationFailedError({ reason: 'keyAuthorization recipient mismatch' })
     }
   }
@@ -381,6 +386,17 @@ function assertAuthorizationScopes(
   if (!seen.has(transferWithMemoSelector)) {
     throw new VerificationFailedError({ reason: 'keyAuthorization must allow transferWithMemo' })
   }
+}
+
+function getSubscriptionRecipients(
+  request: Pick<SubscriptionRequest, 'recipient' | 'methodDetails'>,
+): Address[] {
+  const recipients = [request.recipient, ...(request.methodDetails?.splits ?? []).map((split) => split.recipient)]
+    .map((recipient) => normalizeAddress(recipient, 'recipient'))
+  if (new Set(recipients).size !== recipients.length) {
+    throw new VerificationFailedError({ reason: 'subscription duplicate recipient' })
+  }
+  return recipients
 }
 
 function recoverAuthorizationSource(

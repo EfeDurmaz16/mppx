@@ -1,0 +1,64 @@
+PASS Pinned Tempo v1.15.0
+PASS Local chain 1337
+PASS Separate principal token created
+PASS Mint isolated payment principal: receipt matches submitted transaction hash
+PASS Mint isolated payment principal: chain receipt success
+PASS Fixture 4: challenge HMAC matches approved split request
+PASS Fixture 4: expanded verifier recovers the payer
+PASS Fixture 4: existing charge builder computes exact 8/2
+PASS One payer grant plus activation 8/2: receipt matches submitted transaction hash
+PASS One payer grant plus activation 8/2: chain receipt success
+PASS Approved access key pays exact activation 8/2
+PASS Activation consumes the one-period native cap
+PASS Repeat attempt: receipt matches submitted transaction hash
+PASS Same-period repeat: expected native rejection
+PASS Same-period repeat: payment principal unchanged
+PASS Existing access-key period cap resets to one 10-unit budget
+PASS Backend renewal without another payer grant: receipt matches submitted transaction hash
+PASS Backend renewal without another payer grant: chain receipt success
+PASS Existing store permits only one concurrent renewal submission
+PASS Existing store skips an already-charged period
+PASS Actual backend renewal again pays exact 8/2 without new authorization
+PASS Existing access-key period cap resets to one 10-unit budget
+PASS Outsider payment attempt: receipt matches submitted transaction hash
+PASS Unapproved recipient: expected native rejection
+PASS Unapproved recipient: payment principal unchanged
+PASS Outsider rejection leaves the full available key budget intact
+PASS Scope control: same key pays an approved recipient: receipt matches submitted transaction hash
+PASS Scope control: same key pays an approved recipient: chain receipt success
+PASS Scope control succeeds with the same funded valid key
+PASS Payer revokes native subscription key: receipt matches submitted transaction hash
+PASS Payer revokes native subscription key: chain receipt success
+PASS Native key metadata confirms revocation
+PASS Revoked key payment with available budget: expected native rejection
+PASS Revoked key payment with available budget: payment principal unchanged
+PASS Fixture 5: challenge HMAC matches approved split request
+PASS Fixture 5: expanded verifier recovers the payer
+PASS Fixture 5: existing charge builder computes exact 8/2
+PASS Authorized backend changes approved 8/2 to 10/0: receipt matches submitted transaction hash
+PASS Authorized backend changes approved 8/2 to 10/0: chain receipt success
+PASS Counterexample: native allowlist accepts 10/0 under a verified 8/2 grant
+PASS Post-confirmation receipt verifier detects altered allocation
+PASS Fixture 6: challenge HMAC matches approved split request
+PASS Fixture 6: expanded verifier recovers the payer
+PASS Fixture 6: existing charge builder computes exact 8/2
+PASS Authorized backend omits platform leg: receipt matches submitted transaction hash
+PASS Authorized backend omits platform leg: chain receipt success
+PASS Counterexample: creator receives 8 alone; remaining cap is 2
+PASS Post-confirmation receipt verifier detects missing leg
+PASS Fixture 8: challenge HMAC matches approved split request
+PASS Fixture 8: expanded verifier recovers the payer
+PASS Fixture 8: existing charge builder computes exact 8/2
+PASS Platform installs rejecting receive policy: receipt matches submitted transaction hash
+PASS Platform installs rejecting receive policy: chain receipt success
+PASS Platform policy rejects payer
+PASS Verified subscription grant sends native 8/2 batch into hold: receipt matches submitted transaction hash
+PASS Verified subscription grant sends native 8/2 batch into hold: chain receipt success
+PASS Counterexample: successful access-key batch pays creator 8, platform zero, guard 2
+PASS Held second share still consumes the complete periodic key budget
+PASS Post-confirmation receipt verifier detects hold but does not roll back principal
+PASS Clear platform receive policy: receipt matches submitted transaction hash
+PASS Clear platform receive policy: chain receipt success
+PASS Held-share retry attempt: receipt matches submitted transaction hash
+PASS Same-period full retry after held share: expected native rejection
+PASS Same-period full retry after held share: payment principal unchanged

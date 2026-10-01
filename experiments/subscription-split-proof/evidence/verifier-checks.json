@@ -1,0 +1,140 @@
+{
+  "experiment": "subscription split verifier candidate",
+  "status": "passed",
+  "checkCount": 33,
+  "checks": [
+    {
+      "name": "single-recipient authorization remains valid",
+      "result": "passed"
+    },
+    {
+      "name": "split request uses charge-style raw-unit methodDetails",
+      "result": "passed"
+    },
+    {
+      "name": "split signed authorization verifies",
+      "result": "passed"
+    },
+    {
+      "name": "wallet RPC scopes include exactly both recipients",
+      "result": "passed"
+    },
+    {
+      "name": "raw-unit methodDetails input survives normalization",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects zero split",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects negative split",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects malformed split amount",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects split equals total",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects split exceeds total",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects duplicate split recipients",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects split recipient equals primary",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects malformed recipient",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects empty split list",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects more than ten splits",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects decimal amount in raw split",
+      "result": "passed"
+    },
+    {
+      "name": "schema rejects ambiguous dual split inputs",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects extra recipient",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects missing platform",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects missing creator",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects duplicate recipient",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects unscoped recipient list",
+      "result": "passed"
+    },
+    {
+      "name": "recipient set matching is independent of ordering",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects wrong cap",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects wrong period",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects wrong currency",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects wrong chain",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects wrong expiry",
+      "result": "passed"
+    },
+    {
+      "name": "verifier rejects wrong access key",
+      "result": "passed"
+    },
+    {
+      "name": "original signed challenge has valid HMAC",
+      "result": "passed"
+    },
+    {
+      "name": "changed share with old challenge id fails HMAC",
+      "result": "passed"
+    },
+    {
+      "name": "new challenge for changed share rejects old authorization witness",
+      "result": "passed"
+    },
+    {
+      "name": "raw grant does not encode per-recipient amounts",
+      "result": "passed"
+    }
+  ],
+  "limitation": "Challenge HMAC plus witness binds split terms for SDK verification. Native key scopes still authorize a recipient set plus aggregate cap, not fixed shares or required joint payments."
+}
