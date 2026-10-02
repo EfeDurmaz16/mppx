@@ -19,6 +19,7 @@ import {
   getTransactionReceipt,
   prepareTransactionRequest,
   sendRawTransactionSync,
+  sendTransactionSync,
   signTypedData,
   signTransaction,
 } from 'viem/actions'
@@ -156,11 +157,29 @@ function machineTokenReceipt(parameters: {
     gasUsed: '0x1',
     logs: [
       {
-        address: asset,
+        address: defaults.machineToken[defaults.chainId.testnet].token,
         blockHash,
         blockNumber: '0x1',
         data: encodeAbiParameters([{ type: 'uint256' }], [parameters.amount]),
         logIndex: '0x0',
+        removed: false,
+        topics: encodeEventTopics({
+          abi: Abis.tip20,
+          args: {
+            from: parameters.from,
+            to: settlementSender,
+          },
+          eventName: 'Transfer',
+        }),
+        transactionHash: parameters.hash,
+        transactionIndex: '0x0',
+      },
+      {
+        address: asset,
+        blockHash,
+        blockNumber: '0x1',
+        data: encodeAbiParameters([{ type: 'uint256' }], [parameters.amount]),
+        logIndex: '0x1',
         removed: false,
         topics: encodeEventTopics({
           abi: Abis.tip20,
@@ -320,9 +339,13 @@ describe('tempo', () => {
           await expect(handler.validateCredential(credential)).resolves.toMatchObject({
             intent: 'charge',
           })
+          expect(rpcMethods).not.toContain('eth_getTransactionByHash')
           await expect(handler.verifyCredential(credential)).resolves.toMatchObject({
             status: 'success',
           })
+          expect(rpcMethods.filter((method) => method === 'eth_getTransactionByHash')).toHaveLength(
+            mode === 'hash' ? 1 : 0,
+          )
         } else {
           await expect(handler.validateCredential(credential)).rejects.toThrow(
             'memo is not bound to this challenge',
@@ -450,13 +473,14 @@ describe('tempo', () => {
         reference: '[reference]',
         timestamp: '[timestamp]',
       }).toMatchInlineSnapshot(`
-            {
-              "method": "tempo",
-              "reference": "[reference]",
-              "status": "success",
-              "timestamp": "[timestamp]",
-            }
-          `)
+          {
+            "fundingCurrency": "0x20c0000000000000000000000000000000000001",
+            "method": "tempo",
+            "reference": "[reference]",
+            "status": "success",
+            "timestamp": "[timestamp]",
+          }
+        `)
 
       httpServer.close()
     })
@@ -495,6 +519,7 @@ describe('tempo', () => {
 
       const receipt = Receipt.fromResponse(response)
       expect(receipt.status).toBe('success')
+      expect(receipt.fundingCurrency).toBe(overrideCurrency)
 
       httpServer.close()
     })
@@ -1432,6 +1457,26 @@ describe('tempo', () => {
         transport: custom({
           async request({ method }) {
             if (method === 'eth_chainId') return `0x${defaults.chainId.testnet.toString(16)}`
+            if (method === 'eth_getTransactionByHash' && challenge)
+              return {
+                hash,
+                from: accounts[1].address,
+                type: '0x76',
+                calls: MachineTokenCharge.getRoute({
+                  chainId: defaults.chainId.testnet,
+                  currency: asset,
+                  transfers: [
+                    {
+                      amount: String(challenge.request.amount),
+                      recipient: accounts[0].address,
+                      memo: Attribution.encode({
+                        challengeId: challenge.id,
+                        serverId: challenge.realm,
+                      }),
+                    },
+                  ],
+                })!.calls,
+              }
             if (method === 'eth_getTransactionReceipt' && challenge)
               return machineTokenReceipt({
                 amount: BigInt(String(challenge.request.amount)),
@@ -1485,6 +1530,7 @@ describe('tempo', () => {
       })
       const receipt = await relayServer.verifyCredential(Credential.serialize(credential))
       expect(receipt.reference).toBe(hash)
+      expect(receipt.fundingCurrency).toBe(defaults.machineToken[defaults.chainId.testnet].token)
 
       httpServer.close()
     })
@@ -1610,6 +1656,7 @@ describe('tempo', () => {
       const receipt = await relayServer.verifyCredential(Credential.serialize(credential))
 
       expect(receipt.status).toBe('success')
+      expect(receipt.fundingCurrency).toBe(defaults.machineToken[defaults.chainId.testnet].token)
       expect(feePayerMethods).toEqual(['eth_fillTransaction'])
 
       httpServer.close()
@@ -1958,13 +2005,14 @@ describe('tempo', () => {
           reference: '[reference]',
           timestamp: '[timestamp]',
         }).toMatchInlineSnapshot(`
-            {
-              "method": "tempo",
-              "reference": "[reference]",
-              "status": "success",
-              "timestamp": "[timestamp]",
-            }
-          `)
+          {
+            "fundingCurrency": "0x20c0000000000000000000000000000000000001",
+            "method": "tempo",
+            "reference": "[reference]",
+            "status": "success",
+            "timestamp": "[timestamp]",
+          }
+        `)
       }
 
       httpServer.close()
@@ -2061,13 +2109,14 @@ describe('tempo', () => {
           reference: '[reference]',
           timestamp: '[timestamp]',
         }).toMatchInlineSnapshot(`
-            {
-              "method": "tempo",
-              "reference": "[reference]",
-              "status": "success",
-              "timestamp": "[timestamp]",
-            }
-          `)
+          {
+            "fundingCurrency": "0x20c0000000000000000000000000000000000001",
+            "method": "tempo",
+            "reference": "[reference]",
+            "status": "success",
+            "timestamp": "[timestamp]",
+          }
+        `)
       }
 
       httpServer.close()
@@ -2939,13 +2988,14 @@ describe('tempo', () => {
           reference: '[reference]',
           timestamp: '[timestamp]',
         }).toMatchInlineSnapshot(`
-            {
-              "method": "tempo",
-              "reference": "[reference]",
-              "status": "success",
-              "timestamp": "[timestamp]",
-            }
-          `)
+          {
+            "fundingCurrency": "0x20c0000000000000000000000000000000000001",
+            "method": "tempo",
+            "reference": "[reference]",
+            "status": "success",
+            "timestamp": "[timestamp]",
+          }
+        `)
       }
 
       httpServer.close()
@@ -3179,6 +3229,7 @@ describe('tempo', () => {
         timestamp: '[timestamp]',
       }).toMatchInlineSnapshot(`
           {
+            "fundingCurrency": "0x20c0000000000000000000000000000000000001",
             "method": "tempo",
             "reference": "[reference]",
             "status": "success",
@@ -3250,6 +3301,7 @@ describe('tempo', () => {
         timestamp: '[timestamp]',
       }).toMatchInlineSnapshot(`
           {
+            "fundingCurrency": "0x20c0000000000000000000000000000000000001",
             "method": "tempo",
             "reference": "[reference]",
             "status": "success",
@@ -3632,6 +3684,7 @@ describe('tempo', () => {
 
         const receipt = Receipt.fromResponse(response)
         expect(receipt.status).toBe('success')
+        expect(receipt.fundingCurrency).toBe(asset)
         expect(receipt.method).toBe('tempo')
         expect(receipt.reference).toBeDefined()
       }
@@ -3731,6 +3784,7 @@ describe('tempo', () => {
       const receipt = Receipt.fromResponse(response)
       expect(receipt.status).toBe('success')
       expect(receipt.method).toBe('tempo')
+      expect(receipt.fundingCurrency).toBeUndefined()
       expect(receipt.reference).toBeDefined()
 
       httpServer.close()
@@ -5227,6 +5281,49 @@ describe('tempo', () => {
   })
 
   describe('attribution memo', () => {
+    test.each([false, true])(
+      'funding currency requires a complete payment route (extra transfer: %s)',
+      async (extraTransfer) => {
+        const result = await server.charge({ amount: '1', decimals: 6 })(
+          new Request('https://example.com'),
+        )
+        if (result.status !== 402) throw new Error('Expected challenge')
+        const challenge = Challenge.fromResponse(result.challenge, {
+          methods: [tempo_client.charge()],
+        })
+        const receipt = await sendTransactionSync(client, {
+          account: accounts[1],
+          feeToken: Addresses.pathUsd,
+          calls: [
+            ...(extraTransfer
+              ? [
+                  tokenTransferCall({
+                    amount: 1n,
+                    to: Addresses.stablecoinDex,
+                    token: Addresses.pathUsd,
+                  }),
+                ]
+              : []),
+            tokenTransferCall({
+              amount: BigInt(challenge.request.amount),
+              to: challenge.request.recipient as Hex.Hex,
+              token: challenge.request.currency as Hex.Hex,
+              memo: Attribution.encode({ challengeId: challenge.id, serverId: challenge.realm }),
+            }),
+          ],
+        })
+        const credential = Credential.from({
+          challenge,
+          payload: { hash: receipt.transactionHash, type: 'hash' as const },
+        })
+        const paymentReceipt = await server.verifyCredential(Credential.serialize(credential))
+        expect(paymentReceipt.status).toBe('success')
+        expect(paymentReceipt.fundingCurrency).toBe(
+          extraTransfer ? undefined : challenge.request.currency,
+        )
+      },
+    )
+
     test('client always generates attribution memo (hash credential)', async () => {
       const httpServer = await Http.createServer(async (req, res) => {
         const result = await Mppx_server.toNodeListener(
@@ -6418,8 +6515,8 @@ describe('tempo', () => {
   })
 
   describe('auto-swap', () => {
-    // Use accounts[3] as payer with pathUsd only (no asset).
-    const swapPayer = accounts[3]!
+    // Use a fresh payer so prior tests cannot pre-fund the target currency.
+    const swapPayer = testAccount()
 
     beforeAll(async () => {
       // Fund swap payer with pathUsd only
@@ -6450,41 +6547,46 @@ describe('tempo', () => {
       })
     })
 
-    test('swaps via DEX when user lacks target currency', async () => {
-      const mppx = Mppx_client.create({
-        polyfill: false,
-        methods: [
-          tempo_client({
-            account: swapPayer,
-            autoSwap: true,
-            getClient() {
-              return client
-            },
-          }),
-        ],
-      })
+    test.each(['pull', 'push'] as const)(
+      'swaps via DEX when user lacks target currency (%s)',
+      async (mode) => {
+        const mppx = Mppx_client.create({
+          polyfill: false,
+          methods: [
+            tempo_client({
+              account: swapPayer,
+              autoSwap: true,
+              mode,
+              getClient() {
+                return client
+              },
+            }),
+          ],
+        })
 
-      const httpServer = await Http.createServer(async (req, res) => {
-        const result = await Mppx_server.toNodeListener(
-          server.charge({
-            amount: '1',
-            currency: asset,
-            recipient: accounts[0]!.address,
-          }),
-        )(req, res)
-        if (result.status === 402) return
-        res.end('OK')
-      })
+        const httpServer = await Http.createServer(async (req, res) => {
+          const result = await Mppx_server.toNodeListener(
+            server.charge({
+              amount: '1',
+              currency: asset,
+              recipient: accounts[0]!.address,
+            }),
+          )(req, res)
+          if (result.status === 402) return
+          res.end('OK')
+        })
 
-      const response = await mppx.fetch(httpServer.url)
-      expect(response.status).toBe(200)
+        const response = await mppx.fetch(httpServer.url)
+        expect(response.status).toBe(200)
 
-      const receipt = Receipt.fromResponse(response)
-      expect(receipt.status).toBe('success')
-      expect(receipt.method).toBe('tempo')
+        const receipt = Receipt.fromResponse(response)
+        expect(receipt.status).toBe('success')
+        expect(receipt.fundingCurrency).toBe(Addresses.pathUsd)
+        expect(receipt.method).toBe('tempo')
 
-      httpServer.close()
-    })
+        httpServer.close()
+      },
+    )
 
     test('direct transfer when user has target currency', async () => {
       const mppx = Mppx_client.create({
@@ -6517,6 +6619,7 @@ describe('tempo', () => {
 
       const receipt = Receipt.fromResponse(response)
       expect(receipt.status).toBe('success')
+      expect(receipt.fundingCurrency).toBe(asset)
 
       httpServer.close()
     })
@@ -6550,6 +6653,9 @@ describe('tempo', () => {
 
       const response = await mppx.fetch(httpServer.url)
       expect(response.status).toBe(200)
+
+      const receipt = Receipt.fromResponse(response)
+      expect(receipt.fundingCurrency).toBe(Addresses.pathUsd)
 
       httpServer.close()
     })

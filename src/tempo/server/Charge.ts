@@ -7,6 +7,7 @@ import {
   type TransactionReceipt,
 } from 'viem'
 import {
+  getTransaction,
   getTransactionReceipt,
   sendRawTransaction,
   sendRawTransactionSync,
@@ -188,6 +189,54 @@ export function charge<const parameters extends charge.Parameters>(
   type ProofPayload = Extract<Credential['payload'], { type: 'proof' }>
   type TransactionPayload = Extract<Credential['payload'], { type: 'transaction' }>
 
+  /** Validates a recognized payment route and retains its funding metadata. */
+  function validatePaymentRoute(
+    calls: Parameters<typeof MachineTokenCharge.matchRoute>[0]['calls'],
+    context: CredentialContext,
+    transfers: readonly ExpectedTransfer[],
+    isFeePayerTx = false,
+  ) {
+    const { amount, currency, machineTokenEnabled, recipient } = context
+    const machineRoute = machineTokenEnabled
+      ? MachineTokenCharge.matchRoute({
+          calls,
+          chainId: context.chainId ?? context.client.chain?.id,
+          currency,
+          transfers,
+        })
+      : undefined
+    const matchedCalls =
+      machineRoute?.transfers ??
+      assertTransferCalls(calls, {
+        currency,
+        exactCount: isFeePayerTx,
+        transfers,
+      })
+    assertChallengeBoundCallMemo(matchedCalls, {
+      challengeId: context.challenge.id,
+      realm: context.challenge.realm,
+    })
+
+    if (machineRoute)
+      return {
+        settlementSenders: [machineRoute.settlementSender],
+        fundingCurrency: machineRoute.calls[0].to,
+      }
+
+    try {
+      const fundingCurrency = FeePayer.validateCalls(
+        calls,
+        { amount, currency, recipient },
+        { currency, expectedTransfers: transfers },
+      )
+      return { settlementSenders: [], fundingCurrency }
+    } catch (error) {
+      if (isFeePayerTx) throw error
+      // Unrecognized routes remain valid for unsponsored payments, without funding metadata.
+      return { settlementSenders: [], fundingCurrency: undefined }
+    }
+  }
+
   async function validateHashCredential(
     credential: Credential,
     payload: HashPayload,
@@ -228,7 +277,7 @@ export function charge<const parameters extends charge.Parameters>(
       challengeId: challenge.id,
       realm: challenge.realm,
     })
-    return { receipt: toReceipt(receipt), sender, transfers }
+    return { receipt, sender, transfers }
   }
 
   async function validateProofCredential(
@@ -280,18 +329,8 @@ export function charge<const parameters extends charge.Parameters>(
     request: Method.VerifyContext<typeof Methods.charge>['request'],
     context: CredentialContext,
   ) {
-    const {
-      machineTokenEnabled,
-      amount,
-      chainId,
-      challenge,
-      client,
-      currency,
-      methodDetails,
-      recipient,
-      requestAllowsFeePayer,
-      supportedModes,
-    } = context
+    const { amount, client, methodDetails, recipient, requestAllowsFeePayer, supportedModes } =
+      context
     if (supportedModes && !supportedModes.includes('pull'))
       throw new MismatchError('Transaction credentials are not supported for this challenge.', {})
 
@@ -311,33 +350,14 @@ export function charge<const parameters extends charge.Parameters>(
       requestAllowsFeePayer &&
       !!(Account.is(request.feePayer) ? request.feePayer : feePayer || remoteFeePayer)
     const transfers = getExpectedTransfers({ amount, methodDetails, recipient })
-    const machineTokenRoute = machineTokenEnabled
-      ? MachineTokenCharge.matchRoute({
-          calls: transaction.calls ?? [],
-          chainId: chainId ?? client.chain?.id,
-          currency,
-          transfers,
-        })
-      : undefined
-    const matchedCalls =
-      machineTokenRoute?.transfers ??
-      assertTransferCalls(transaction.calls ?? [], {
-        currency,
-        exactCount: isFeePayerTx,
-        transfers,
-      })
-    assertChallengeBoundCallMemo(matchedCalls, {
-      challengeId: challenge.id,
-      realm: challenge.realm,
-    })
+    const { settlementSenders, fundingCurrency } = validatePaymentRoute(
+      transaction.calls ?? [],
+      context,
+      transfers,
+      isFeePayerTx,
+    )
 
     if (isFeePayerTx) {
-      if (!machineTokenRoute)
-        FeePayer.validateCalls(
-          transaction.calls,
-          { amount, currency, recipient },
-          { currency, expectedTransfers: transfers },
-        )
       FeePayer.assertAllowedFeeToken(transaction, context.allowedFeeTokens)
     } else {
       await viem_call(
@@ -347,9 +367,10 @@ export function charge<const parameters extends charge.Parameters>(
     }
 
     return {
+      fundingCurrency,
       isFeePayerTx,
       serializedTransaction,
-      settlementSenders: machineTokenRoute ? [machineTokenRoute.settlementSender] : [],
+      settlementSenders,
       transaction,
       transfers,
     }
@@ -381,8 +402,14 @@ export function charge<const parameters extends charge.Parameters>(
       }
 
       case 'transaction': {
-        const { isFeePayerTx, serializedTransaction, settlementSenders, transaction, transfers } =
-          await validateTransactionCredential(credential, context.payload, request, context)
+        const {
+          fundingCurrency,
+          isFeePayerTx,
+          serializedTransaction,
+          settlementSenders,
+          transaction,
+          transfers,
+        } = await validateTransactionCredential(credential, context.payload, request, context)
         return {
           details: {
             mode: 'pull' as const,
@@ -390,6 +417,7 @@ export function charge<const parameters extends charge.Parameters>(
             serializedTransaction,
             transfers,
           },
+          fundingCurrency,
           isFeePayerTx,
           serializedTransaction,
           settlementSenders,
@@ -540,7 +568,22 @@ export function charge<const parameters extends charge.Parameters>(
               reason: 'Transaction hash has already been used',
             })
           }
-          return receipt
+          // Only final hash receipts need this lookup; validation stays receipt-only.
+          const transaction = await getTransaction(client, { hash }).catch(() => undefined)
+          let fundingCurrency: string | undefined
+          if (transaction && TempoAddress.isEqual(transaction.from, validated.details.sender)) {
+            try {
+              fundingCurrency = validatePaymentRoute(
+                (transaction as Transaction.Transaction).calls ??
+                  (transaction.to ? [{ to: transaction.to, data: transaction.input }] : []),
+                context,
+                validated.details.transfers,
+              ).fundingCurrency
+            } catch {
+              // Unrecognized calls do not invalidate an already verified payment.
+            }
+          }
+          return toReceipt(receipt.transactionHash, fundingCurrency)
         }
 
         case 'proof': {
@@ -550,17 +593,18 @@ export function charge<const parameters extends charge.Parameters>(
             })
           }
 
-          return {
-            method: 'tempo',
-            status: 'success',
-            timestamp: new Date().toISOString(),
-            reference: challenge.id,
-          } as const
+          return toReceipt(challenge.id)
         }
 
         case 'transaction': {
-          const { isFeePayerTx, serializedTransaction, settlementSenders, transaction, transfers } =
-            validated
+          const {
+            fundingCurrency,
+            isFeePayerTx,
+            serializedTransaction,
+            settlementSenders,
+            transaction,
+            transfers,
+          } = validated
 
           // Pre-broadcast dedup: catch exact byte-for-byte replays early.
           const hash = keccak256(serializedTransaction)
@@ -728,7 +772,7 @@ export function charge<const parameters extends charge.Parameters>(
                 throw new VerificationFailedError({
                   reason: 'Broadcast transaction hash does not match the signed transaction',
                 })
-              return toReceipt(receipt)
+              return toReceipt(receipt.transactionHash, fundingCurrency)
             }
 
             // Optimistic path: broadcast without waiting for confirmation
@@ -748,12 +792,7 @@ export function charge<const parameters extends charge.Parameters>(
               throw new VerificationFailedError({
                 reason: 'Sponsor budget reservation ownership was lost after broadcast',
               })
-            return {
-              method: 'tempo',
-              status: 'success',
-              timestamp: new Date().toISOString(),
-              reference,
-            } as const
+            return toReceipt(reference, fundingCurrency)
           } catch (error) {
             if (!broadcastAttempted) {
               if (reservation) await SponsorBudget.release(sponsorBudgetStore!, reservation)
@@ -1104,6 +1143,9 @@ async function assertTransferLogs(
     validateSender?: charge.ValidateSender | undefined
   },
 ): Promise<TransferLog[]> {
+  if (receipt.status !== 'success')
+    throw new Error(`Transaction reverted: ${receipt.transactionHash}`)
+
   const logs = getTransferLogEffects(receipt)
   const used = new Set<number>()
   const matched: TransferLog[] = []
@@ -1377,16 +1419,13 @@ async function isActiveAccessKey(
 }
 
 /** @internal */
-function toReceipt(receipt: TransactionReceipt) {
-  const { status, transactionHash } = receipt
-  if (status !== 'success') {
-    throw new Error(`Transaction reverted: ${transactionHash}`)
-  }
+function toReceipt(reference: string, fundingCurrency?: string) {
   return {
+    ...(fundingCurrency ? { fundingCurrency } : {}),
     method: 'tempo',
     status: 'success',
     timestamp: new Date().toISOString(),
-    reference: transactionHash,
+    reference,
   } as const
 }
 
