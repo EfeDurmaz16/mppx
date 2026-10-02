@@ -26,6 +26,7 @@ import type * as Client from '../../viem/Client.js'
 import * as ClientResolver from '../../viem/Client.js'
 import * as Attribution from '../Attribution.js'
 import * as Account from '../internal/account.js'
+import * as Charge from '../internal/charge.js'
 import * as defaults from '../internal/defaults.js'
 import * as FeePayer from '../internal/fee-payer.js'
 import * as Proof from '../internal/proof.js'
@@ -72,6 +73,8 @@ export function subscription<const parameters extends subscription.Parameters>(
     decimals = defaults.decimals,
     description,
     externalId,
+    methodDetails,
+    splits,
     periodCount,
     periodUnit,
     subscriptionExpires,
@@ -102,6 +105,8 @@ export function subscription<const parameters extends subscription.Parameters>(
       decimals,
       description,
       externalId,
+      methodDetails,
+      splits,
       periodCount,
       periodUnit,
       recipient,
@@ -279,6 +284,7 @@ export function subscription<const parameters extends subscription.Parameters>(
             : isReusableSubscription(subscription, parsedRequest),
         lookupKey: resolved.key,
         async create() {
+          const approvedRequest = structuredClone(parsedRequest)
           const activation = withSubscriptionAccessKey(
             await activateSubscription({
               accessKey,
@@ -306,7 +312,7 @@ export function subscription<const parameters extends subscription.Parameters>(
           validateSubscriptionSettlement(activation, {
             expectedLookupKey: resolved.key,
             expectedPeriodIndex: 0,
-            request: parsedRequest,
+            request: approvedRequest,
           })
           return activation
         },
@@ -538,6 +544,7 @@ async function activateSubscription(parameters: {
     periodCount: request.periodCount,
     periodUnit: request.periodUnit,
     recipient: request.recipient,
+    splits: request.methodDetails?.splits,
     reference,
     subscriptionExpires: request.subscriptionExpires,
     subscriptionId: createSubscriptionId(),
@@ -573,6 +580,10 @@ async function settleRenewal(parameters: {
     inFlightReference,
     periodIndex,
     async renew({ inFlightReference, periodIndex, subscription: started }) {
+      const previous = {
+        ...started,
+        splits: started.splits?.map((split) => ({ ...split })),
+      }
       const renewed = withSubscriptionAccessKey(
         await renew({
           inFlightReference,
@@ -585,7 +596,7 @@ async function settleRenewal(parameters: {
         expectedLookupKey,
         expectedPeriodIndex: periodIndex,
         expectedSubscriptionId: subscription.subscriptionId,
-        previous: started,
+        previous,
         request,
       })
       return renewed
@@ -706,6 +717,7 @@ function comparableSubscriptionBinding(value: SubscriptionRecord | SubscriptionR
     periodCount: value.periodCount,
     periodUnit: value.periodUnit,
     recipient: value.recipient.toLowerCase(),
+    splits: canonicalSubscriptionSplits(value),
     subscriptionExpires: value.subscriptionExpires,
   }
 }
@@ -832,8 +844,26 @@ function subscriptionBinding(request: SubscriptionRequest) {
     periodCount: request.periodCount,
     periodUnit: request.periodUnit,
     recipient: request.recipient,
+    splits: canonicalSubscriptionSplits(request),
     subscriptionExpires: request.subscriptionExpires,
   }
+}
+
+/** Returns an order-independent binding for the approved raw-unit allocations. */
+function canonicalSubscriptionSplits(value: SubscriptionRecord | SubscriptionRequest): string {
+  const splits =
+    'splits' in value ? value.splits : (value as SubscriptionRequest).methodDetails?.splits
+  return JSON.stringify(
+    (splits ?? [])
+      .map(({ recipient, amount }) => ({
+        recipient: recipient.toLowerCase(),
+        amount: BigInt(amount).toString(),
+      }))
+      .sort(
+        (left, right) =>
+          left.recipient.localeCompare(right.recipient) || left.amount.localeCompare(right.amount),
+      ),
+  )
 }
 
 function resolveRenewalHandler(parameters: {
@@ -890,7 +920,10 @@ async function submitSubscriptionPayment(parameters: {
   keyAuthorization?: `0x${string}` | undefined
   lookupKey: string
   request: Pick<SubscriptionRequest, 'amount'> & {
-    methodDetails?: { chainId?: number | undefined } | undefined
+    methodDetails?:
+      | { chainId?: number | undefined; splits?: SubscriptionRecord['splits'] }
+      | undefined
+    splits?: SubscriptionRecord['splits']
   } & { currency: Address | string; recipient: Address | string }
   settlementReference: string
   source: { address: Address; chainId: number }
@@ -910,6 +943,19 @@ async function submitSubscriptionPayment(parameters: {
     store,
     waitForConfirmation,
   } = parameters
+  const splits = request.splits ?? request.methodDetails?.splits
+  if (splits?.length && !waitForConfirmation) {
+    throw new VerificationFailedError({
+      reason: 'subscription splits require confirmed recipient credits',
+    })
+  }
+  const transfers = Charge.getTransfers({
+    amount: request.amount,
+    recipient: request.recipient as Address,
+    methodDetails: {
+      splits: splits?.map(({ amount, recipient }) => ({ amount, recipient: recipient as Address })),
+    },
+  })
   const stored =
     (await store.getAccessKey(lookupKey)) ??
     (await store.getAccessKeyByAddress(accessKey.accessKeyAddress))
@@ -934,16 +980,14 @@ async function submitSubscriptionPayment(parameters: {
   })
   const baseTransaction = {
     account,
-    calls: [
-      {
-        data: encodeFunctionData({
-          abi: Abis.tip20,
-          functionName: 'transferWithMemo',
-          args: [request.recipient as Address, BigInt(request.amount), memo],
-        }),
-        to: request.currency as Address,
-      },
-    ],
+    calls: transfers.map((transfer) => ({
+      data: encodeFunctionData({
+        abi: Abis.tip20,
+        functionName: 'transferWithMemo',
+        args: [transfer.recipient, BigInt(transfer.amount), memo],
+      }),
+      to: request.currency as Address,
+    })),
     chainId,
     ...(keyAuthorization
       ? { keyAuthorization: KeyAuthorization.deserialize(keyAuthorization) }
@@ -972,6 +1016,18 @@ async function submitSubscriptionPayment(parameters: {
       transaction: userTransaction,
       simulate: (request) => viem_call(client, request as never),
       async complete() {
+        FeePayer.validateCalls(
+          userTransaction.calls,
+          {
+            amount: request.amount,
+            currency: request.currency,
+            recipient: request.recipient,
+          },
+          {
+            currency: request.currency as Address,
+            expectedTransfers: transfers.map((transfer) => ({ ...transfer, memo })),
+          },
+        )
         const sponsored = FeePayer.prepareSponsoredTransaction({
           account: feePayer,
           chainId: chainId ?? client.chain!.id,
@@ -1015,12 +1071,14 @@ async function submitSubscriptionPayment(parameters: {
       reason: `subscription transaction reverted: ${receipt.transactionHash}`,
     })
   }
-  assertSubscriptionTransfer(receipt, {
-    amount: BigInt(request.amount),
-    currency: request.currency as Address,
-    memo,
-    recipient: request.recipient as Address,
-  })
+  for (const transfer of transfers) {
+    assertSubscriptionTransfer(receipt, {
+      amount: BigInt(transfer.amount),
+      currency: request.currency as Address,
+      memo,
+      recipient: transfer.recipient,
+    })
+  }
   return receipt.transactionHash
 }
 
@@ -1029,7 +1087,7 @@ async function submitSubscriptionPayment(parameters: {
  *
  * Transaction success alone is not proof: under Tempo T6 (TIP-1028) a recipient
  * receive policy can hold the funds in `ReceivePolicyGuard` while the tx still
- * succeeds. Settlement always emits one `transferWithMemo(recipient, amount,
+ * succeeds. Each settlement leg emits `transferWithMemo(recipient, amount,
  * memo)`, so this requires a matching `TransferWithMemo` log on the expected
  * token. A held transfer fails because its `to` is the guard, and the memo
  * binding excludes unrelated transfer effects in the same receipt.
@@ -1272,7 +1330,7 @@ export declare namespace subscription {
         /** Stable idempotency/reconciliation reference persisted before the renewal hook runs. */
         inFlightReference: string
         periodIndex: number
-        /** Custom renewal hooks must preserve amount, currency, recipient, period, expiry, and lookup key. */
+        /** Custom renewal hooks must preserve amount, currency, recipients and splits, period, expiry, and lookup key. */
         subscription: SubscriptionRecord
       }) => Promise<RenewalResult>
       store?: Store.AtomicStore<Record<string, unknown>> | undefined

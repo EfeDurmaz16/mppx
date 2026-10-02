@@ -1,21 +1,31 @@
 # Tempo subscription split verifier experiment
 
-Local test on 2026-10-01. This keeps the existing subscription access-key mechanism and tests only a proposed split schema/verifier extension. It deploys no application Solidity. It is not complete or merge-ready SDK split support.
+This directory preserves the 2026-10-01 split schema/verifier experiment and documents the 2026-10-02 SDK lifecycle follow-up. Both use the existing subscription access-key mechanism and deploy no application Solidity. This remains experimental support, not a merge-ready implementation.
+
+## SDK lifecycle follow-up, 2026-10-02
+
+The local follow-up extends `src/tempo/subscription/Types.ts` and `src/tempo/server/Subscription.ts`, with twelve new cases in `Subscription.test.ts`. Approved raw-unit splits are persisted in the subscription record and included in stable, reuse and hook-result binding. Activation and renewal snapshot the approved terms before custom callbacks run, so in-place mutations cannot alter both sides of the comparison. Default HTTP activation and request/background renewal share the existing charge transfer builder. Sponsored calls are checked against every allocation, and confirmed receipts must credit every leg. Split payments require `waitForConfirmation: true`; existing single-recipient optimistic behavior remains available.
+
+The server suite passes 52 tests, surrounding schema/key/store/lifecycle suites pass 73 tests, and the standalone signed verifier passes 33 checks. Strict source typechecking, scoped lint and formatting pass using the checkout's frozen dependencies. Generated HTML modules were built locally; the prior dependency/compiler limitation below describes the earlier frozen run.
+
+A separate local Tempo v1.15.0 proof passes 24 checks using viem 2.57.1, isolated chain ID 1337 and the T11 control genesis. It exercises the default sponsored SDK HTTP activation and backend renewal, rather than a custom settlement callback. One root-key grant pays 8/2 on activation and a later renewal again pays 8/2. Concurrent renewals settle only once; changed shares or recipients cannot reuse the subscription. A blocked platform receive policy succeeds onchain with creator 8, platform 0 and guard 2; the SDK rejects settlement and does not advance the paid period. A same-period retry fails with the period cap consumed and moves no additional principal. Native receive-policy and existing store failure/retry semantics remain unchanged. No recovery state or claim/refund mechanism was added.
+
+The 2026-10-01 evidence below remains the original schema/verifier experiment. This follow-up does not add onchain exact-share enforcement or establish wallet UI, public-network compatibility, unattended public-testnet renewals, durable-store crash recovery or production readiness. Native grants still limit total spending and permitted recipients; custom hooks remain responsible for proving their settlement.
 
 ## Candidate update
 
-Two source files change: `src/tempo/Methods.ts` and `src/tempo/subscription/KeyAuthorization.ts`. The source diff is 59 additions and 10 deletions. It is based on the reviewed mppx source at upstream commit `569be2193efe230acec81414d4660c7c1c8387d3` and the published feasibility branch at `5c83d972449273d942a2b7638f716831ba395038`.
+The original candidate changed two source files: `src/tempo/Methods.ts` and `src/tempo/subscription/KeyAuthorization.ts`. That source diff is 59 additions and 10 deletions. It is based on the reviewed mppx source at upstream commit `569be2193efe230acec81414d4660c7c1c8387d3` and the published feasibility branch at `5c83d972449273d942a2b7638f716831ba395038`.
 
 The input reuses charge-style splits: amount 10, primary creator recipient, platform split amount 2. The primary amount is the remainder 8. Amounts normalize to raw six-decimal units under `methodDetails.splits`.
 
-| Stage | Candidate behavior |
-| --- | --- |
-| Schema | Positive shares, split total below total, valid normalized unique addresses, no collision with primary recipient, maximum ten splits |
-| Client authorization | Existing periodic token cap, expiry and witness; transferWithMemo scope lists creator and platform |
-| Verifier | Exactly the approved recipient set, without omissions, extras or duplicates; existing token, total cap, period, expiry, chain and key checks remain |
-| Request integrity | Existing challenge HMAC covers the complete split request; signed authorization witness binds the challenge ID |
-| Runtime execution | Experimental callback builds two transferWithMemo calls with existing charge getTransfers and submits one native transaction |
-| Receipt verification | Checks actual per-recipient token, source, amount and memo events after confirmation |
+| Stage                | Candidate behavior                                                                                                                                  |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Schema               | Positive shares, split total below total, valid normalized unique addresses, no collision with primary recipient, maximum ten splits                |
+| Client authorization | Existing periodic token cap, expiry and witness; transferWithMemo scope lists creator and platform                                                  |
+| Verifier             | Exactly the approved recipient set, without omissions, extras or duplicates; existing token, total cap, period, expiry, chain and key checks remain |
+| Request integrity    | Existing challenge HMAC covers the complete split request; signed authorization witness binds the challenge ID                                      |
+| Runtime execution    | Experimental callback builds two transferWithMemo calls with existing charge getTransfers and submits one native transaction                        |
+| Receipt verification | Checks actual per-recipient token, source, amount and memo events after confirmation                                                                |
 
 The standalone key verifier cannot validate an altered split request paired with an unchanged challenge ID. The existing challenge verification must run with it, as the SDK pipeline normally does. A reissued challenge changes the witness, so the old authorization fails. Neither stage forces the native key to allocate 8/2 on each execution: the native grant contains an allowed recipient list and aggregate token budget.
 
@@ -23,19 +33,19 @@ The standalone key verifier cannot validate an altered split request paired with
 
 33 signed schema/verifier checks and 64 local chain checks passed, for 97 total. There are 14 unique transaction receipts: 11 successful, 3 reverted, plus one RPC rejection after key revocation. Every submitted transaction receipt is checked against its exact submitted hash. Sequential replacement detection is disabled for Tempo expiring-nonce transactions.
 
-| Case | Actual result |
-| --- | --- |
-| Existing single recipient | Signing and verification preserved |
-| Valid two-recipient grant | One local payer-signed grant registers the key and pays exact 8/2 |
-| Later billing period | Same access key pays another 8/2 without another root authorization |
-| Same-period full repeat | Native SpendingLimitExceeded; principal unchanged |
-| Concurrent renewals | Existing memory-store claim permits only one callback/transaction; subsequent same-period store renewal skips |
-| Unapproved destination | Native transaction reverts before user calls; no principal movement or budget consumption. Same funded key can pay an approved recipient |
-| Root revokes key | Native metadata confirms isRevoked=true; a previously valid one-unit payment is rejected with remaining budget available |
-| Backend submits 10/0 | Native key accepts it despite having passed the proposed verifier against an approved 8/2 request |
-| Backend submits only creator 8 | Native key accepts it; platform unchanged and remaining period budget is 2 |
-| Platform receive policy blocks 8/2 batch | Receipt succeeds; creator receives 8, platform receives zero, guard holds 2; all 10 of the key budget is consumed |
-| Clear receive policy and retry same period | SpendingLimitExceeded; already committed principal remains unchanged |
+| Case                                       | Actual result                                                                                                                            |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Existing single recipient                  | Signing and verification preserved                                                                                                       |
+| Valid two-recipient grant                  | One local payer-signed grant registers the key and pays exact 8/2                                                                        |
+| Later billing period                       | Same access key pays another 8/2 without another root authorization                                                                      |
+| Same-period full repeat                    | Native SpendingLimitExceeded; principal unchanged                                                                                        |
+| Concurrent renewals                        | Existing memory-store claim permits only one callback/transaction; subsequent same-period store renewal skips                            |
+| Unapproved destination                     | Native transaction reverts before user calls; no principal movement or budget consumption. Same funded key can pay an approved recipient |
+| Root revokes key                           | Native metadata confirms isRevoked=true; a previously valid one-unit payment is rejected with remaining budget available                 |
+| Backend submits 10/0                       | Native key accepts it despite having passed the proposed verifier against an approved 8/2 request                                        |
+| Backend submits only creator 8             | Native key accepts it; platform unchanged and remaining period budget is 2                                                               |
+| Platform receive policy blocks 8/2 batch   | Receipt succeeds; creator receives 8, platform receives zero, guard holds 2; all 10 of the key budget is consumed                        |
+| Clear receive policy and retry same period | SpendingLimitExceeded; already committed principal remains unchanged                                                                     |
 
 Receipt checks detect the three bad distribution cases after inclusion, but cannot undo their principal movement. The fixed-allocation and all-beneficiaries-credit-or-no-principal requirements therefore fail under this native allowlist plus ordinary-transfer extension. These are demonstrated counterexamples, not wallet incompatibility claims.
 
@@ -47,7 +57,7 @@ The positive renewal uses a ten-second development period to observe a real rese
 
 The test calls the modified subscription signing/verifier helpers, existing charge transfer builder, native keychain and existing `SubscriptionStore.renew`. Its custom renewal callback closes over the split request. The store backend is memory, with simultaneous renewal callers. This proves that composition locally; it does not prove persistent-store restart/crash recovery or a complete HTTP subscription.
 
-The default production payment handler remains unchanged and still sends the total to one recipient. Complete SDK support would also need split persistence, subscription binding, client/RPC propagation, activation and renewal batch construction, fee-payer checks, receipts and lifecycle integration. Merely merging this schema/verifier patch would expose incomplete split support.
+At the original schema/verifier-only snapshot, the default production payment handler remained unchanged and sent the total to one recipient. Split persistence, subscription binding, activation and renewal batch construction, fee-payer checks, receipts and lifecycle integration were still missing. The local SDK lifecycle follow-up above addresses those execution gaps; the frozen chain results below came from the earlier custom composition.
 
 Actual wallet approval/UI, live-network compatibility and unattended public-testnet renewals remain outside this experiment. Local access-key registration, period reset, backend execution and onchain revoke are now measured rather than only inferred.
 

@@ -43,6 +43,8 @@ export type SubscriptionRecord = {
   periodCount: string
   periodUnit: SubscriptionPeriodUnit
   recipient: Address | string
+  /** Additional raw-unit allocations; the primary recipient receives the remainder. */
+  splits?: readonly Readonly<{ amount: string; recipient: Address | string }>[] | undefined
   reference: string
   subscriptionExpires: string
   subscriptionId: string

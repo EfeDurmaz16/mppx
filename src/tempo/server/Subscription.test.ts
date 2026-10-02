@@ -36,6 +36,9 @@ const subscriptionDefaultChainId = 42431
 const subscriptionAmount = '10'
 const subscriptionCurrency = '0x20c0000000000000000000000000000000000001'
 const subscriptionKey = 'user-1:plan:pro'
+const platformRecipient = '0x1234567890abcdef1234567890abcdef12345679'
+const subscriptionSplits = [{ recipient: platformRecipient, amount: '2' }] as const
+const storedSubscriptionSplits = [{ recipient: platformRecipient, amount: '2000000' }] as const
 const subscriptionPeriodCount = '1'
 const subscriptionPeriodUnit = 'day'
 const subscriptionPeriodMilliseconds = 86_400_000
@@ -193,27 +196,44 @@ const receivePolicyGuard = '0xB10C000000000000000000000000000000000000' as Addre
 
 /**
  * Mock client whose `eth_sendRawTransactionSync` returns a confirmed receipt
- * with a `TransferWithMemo` log derived from the broadcast transaction.
+ * with a `TransferWithMemo` log for every broadcast payment leg.
  *
  * `redirectTo` simulates a T6 (TIP-1028) held transfer (credits the guard, not
  * the recipient); `addUnrelatedTransfer` adds a memo-less `Transfer` to the
  * recipient. By default only the renewal (second) broadcast is affected so
  * activation succeeds; `redirectActivation` also holds the first broadcast.
+ * `redirectLeg` limits the held transfer to one payment leg.
  */
 function createConfirmingBillingClient(options?: {
+  account?: typeof rootAccount
   addUnrelatedTransfer?: boolean
+  failSimulation?: number
   redirectActivation?: boolean
+  redirectLeg?: number
   redirectTo?: Address
 }) {
   const rpcMethods: string[] = []
+  const callRequests: Record<string, unknown>[] = []
+  const broadcasts: { from: Address; calls: readonly { data: Hex; to: Address }[] }[] = []
   let broadcastIndex = 0
+  let simulations = 0
   const client = createClient({
+    account: options?.account,
     chain: { ...tempo_chain, id: chainId },
     transport: custom({
       async request({ method, params }) {
         rpcMethods.push(method)
         if (method === 'eth_chainId') return `0x${chainId.toString(16)}`
-        if (method === 'eth_call') return '0x'
+        if (method === 'eth_getTransactionCount') return '0x0'
+        if (method === 'eth_estimateGas') return '0x5208'
+        if (method === 'eth_maxPriorityFeePerGas') return '0x1'
+        if (method === 'eth_getBlockByNumber') return { baseFeePerGas: '0x1' }
+        if (method === 'eth_call') {
+          callRequests.push((params as [Record<string, unknown>])[0])
+          if (options?.failSimulation !== undefined && ++simulations >= options.failSimulation)
+            throw new Error('final sponsored simulation reverted')
+          return '0x'
+        }
         if (method === 'eth_sendRawTransactionSync') {
           const index = broadcastIndex++
           const isRenewal = index >= 1
@@ -224,26 +244,27 @@ function createConfirmingBillingClient(options?: {
             from: Address
             calls: readonly { data: Hex; to: Address }[]
           }
-          const call = transaction.calls[0]!
-          const { args } = decodeFunctionData({
-            abi: Abis.tip20,
-            data: call.data,
-          })
-          const [recipient, amount, memo] = args as [Address, bigint, Hex]
-          const shouldRedirect = options?.redirectTo && (isRenewal || options?.redirectActivation)
-          const creditedTo = shouldRedirect ? options!.redirectTo! : recipient
+          broadcasts.push(transaction)
           const hash = `0x${index.toString(16).padStart(64, '0')}` as Hex
-          const baseLog = {
-            blockHash: confirmedBlockHash,
-            blockNumber: '0x1',
-            data: encodeAbiParameters([{ type: 'uint256' }], [amount]),
-            logIndex: '0x0',
-            removed: false,
-            transactionHash: hash,
-            transactionIndex: '0x0',
-          } as const
-          const logs: unknown[] = [
-            {
+          const logs: unknown[] = []
+          for (const [leg, call] of transaction.calls.entries()) {
+            const { args } = decodeFunctionData({ abi: Abis.tip20, data: call.data })
+            const [recipient, amount, memo] = args as [Address, bigint, Hex]
+            const shouldRedirect =
+              options?.redirectTo &&
+              (isRenewal || options?.redirectActivation) &&
+              (options.redirectLeg === undefined || options.redirectLeg === leg)
+            const creditedTo = shouldRedirect ? options!.redirectTo! : recipient
+            const baseLog = {
+              blockHash: confirmedBlockHash,
+              blockNumber: '0x1',
+              data: encodeAbiParameters([{ type: 'uint256' }], [amount]),
+              logIndex: `0x${logs.length.toString(16)}`,
+              removed: false,
+              transactionHash: hash,
+              transactionIndex: '0x0',
+            } as const
+            logs.push({
               ...baseLog,
               address: call.to,
               topics: encodeEventTopics({
@@ -251,20 +272,20 @@ function createConfirmingBillingClient(options?: {
                 args: { from: transaction.from, memo, to: creditedTo },
                 eventName: 'TransferWithMemo',
               }),
-            },
-          ]
-          // Memo-less Transfer to the recipient: must not satisfy the check.
-          if (isRenewal && options?.addUnrelatedTransfer) {
-            logs.push({
-              ...baseLog,
-              address: call.to,
-              logIndex: '0x1',
-              topics: encodeEventTopics({
-                abi: Abis.tip20,
-                args: { from: transaction.from, to: recipient },
-                eventName: 'Transfer',
-              }),
             })
+            // Memo-less credit must not satisfy settlement verification.
+            if (isRenewal && options?.addUnrelatedTransfer) {
+              logs.push({
+                ...baseLog,
+                address: call.to,
+                logIndex: `0x${logs.length.toString(16)}`,
+                topics: encodeEventTopics({
+                  abi: Abis.tip20,
+                  args: { from: transaction.from, to: recipient },
+                  eventName: 'Transfer',
+                }),
+              })
+            }
           }
           return {
             blockHash: confirmedBlockHash,
@@ -277,7 +298,7 @@ function createConfirmingBillingClient(options?: {
             logs,
             logsBloom: `0x${'0'.repeat(512)}`,
             status: '0x1',
-            to: call.to,
+            to: transaction.calls[0]!.to,
             transactionHash: hash,
             transactionIndex: '0x0',
             type: '0x0',
@@ -287,7 +308,15 @@ function createConfirmingBillingClient(options?: {
       },
     }),
   })
-  return { client, rpcMethods }
+  return { broadcasts, callRequests, client, rpcMethods }
+}
+
+function submittedTransfers(transaction: { calls: readonly { data: Hex; to: Address }[] }) {
+  return transaction.calls.map((call) => {
+    const { args } = decodeFunctionData({ abi: Abis.tip20, data: call.data })
+    const [recipient, amount] = args as [Address, bigint, Hex]
+    return { amount, currency: call.to.toLowerCase(), recipient: recipient.toLowerCase() }
+  })
 }
 
 describe('tempo.subscription', () => {
@@ -759,9 +788,18 @@ describe('tempo.subscription', () => {
   async function activateConfirmedSubscription(parameters: {
     client: ReturnType<typeof createConfirmingBillingClient>['client']
     store: ReturnType<typeof Store.memory>
+    splits?: readonly { amount: string; recipient: string }[]
+    feePayer?: typeof rootAccount
+    expectedStatus?: 200 | 402
+    waitForConfirmation?: boolean
+    activate?: subscription.Parameters['activate']
   }) {
-    const { client, store } = parameters
+    const { client, store, splits, feePayer, waitForConfirmation, activate } = parameters
     const method = subscription({
+      splits,
+      feePayer,
+      waitForConfirmation,
+      activate,
       amount: subscriptionAmount,
       chainId,
       currency: subscriptionCurrency,
@@ -769,7 +807,7 @@ describe('tempo.subscription', () => {
       periodCount: subscriptionPeriodCount,
       periodUnit: subscriptionPeriodUnit,
       recipient: subscriptionRecipient,
-      resolve: async () => ({ key: subscriptionKey }),
+      resolve: async () => ({ key: subscriptionKey, ...(activate ? { accessKey } : {}) }),
       store,
       subscriptionExpires: activeSubscriptionExpires,
     })
@@ -779,19 +817,270 @@ describe('tempo.subscription', () => {
     )
     if (challengeResult.status !== 402) throw new Error('expected activation challenge')
     const challenge = Challenge.fromResponse(challengeResult.challenge)
-    const accessKey = (
+    const generatedAccessKey = (
       challenge.request as ReturnType<typeof Methods.subscription.schema.request.parse>
     ).methodDetails?.accessKey
-    if (!accessKey) throw new Error('expected generated access key')
-    const credential = await createCredential(challenge, rootAccount.address, accessKey)
+    if (!generatedAccessKey) throw new Error('expected generated access key')
+    const credential = await createCredential(challenge, rootAccount.address, generatedAccessKey)
     const activated = await mppx.tempo.subscription({})(
       new Request('https://example.com/resource', {
         headers: { Authorization: Credential.serialize(credential) },
       }),
     )
-    expect(activated.status).toBe(200)
-    return { mppx }
+    expect(activated.status).toBe(parameters.expectedStatus ?? 200)
+    return { activated, challenge, credential, mppx }
   }
+
+  const expectedSplitTransfers = [
+    { amount: 8000000n, currency: subscriptionCurrency, recipient: subscriptionRecipient },
+    { amount: 2000000n, currency: subscriptionCurrency, recipient: platformRecipient },
+  ]
+
+  async function makeSubscriptionDue(store: ReturnType<typeof Store.memory>) {
+    const subscriptions = SubscriptionStore.fromStore(store)
+    const record = await subscriptions.getByKey(subscriptionKey)
+    if (!record) throw new Error('expected subscription record')
+    await subscriptions.put({
+      ...record,
+      billingAnchor: new Date(Date.now() - 3 * subscriptionPeriodMilliseconds).toISOString(),
+      lastChargedPeriod: 0,
+    })
+    return record
+  }
+
+  test.each(['request', 'background'] as const)(
+    'persists approved splits and renews 8/2 through the %s path',
+    async (path) => {
+      const store = Store.memory()
+      const billing = createConfirmingBillingClient()
+      const { mppx } = await activateConfirmedSubscription({
+        client: billing.client,
+        splits: subscriptionSplits,
+        store,
+      })
+      const subscriptions = SubscriptionStore.fromStore(store)
+      const activated = await subscriptions.getByKey(subscriptionKey)
+      expect(activated?.splits).toEqual(storedSubscriptionSplits)
+      expect(submittedTransfers(billing.broadcasts[0]!)).toEqual(expectedSplitTransfers)
+      expect(
+        (await mppx.tempo.subscription({})(new Request('https://example.com/resource'))).status,
+      ).toBe(200)
+      expect(billing.broadcasts).toHaveLength(1)
+
+      const record = await makeSubscriptionDue(store)
+      if (path === 'request') {
+        const result = await mppx.tempo.subscription({})(
+          new Request('https://example.com/resource'),
+        )
+        expect(result.status).toBe(200)
+      } else {
+        expect(
+          await mppx.tempo.subscription.renew({ subscriptionId: record.subscriptionId }),
+        ).not.toBeNull()
+      }
+      expect(billing.broadcasts).toHaveLength(2)
+      expect(submittedTransfers(billing.broadcasts[1]!)).toEqual(expectedSplitTransfers)
+      const renewed = await subscriptions.get(record.subscriptionId)
+      expect(renewed?.splits).toEqual(storedSubscriptionSplits)
+      expect(renewed?.lastChargedPeriod).toBeGreaterThan(0)
+    },
+  )
+
+  test.each([
+    { splits: [{ recipient: platformRecipient, amount: '3' }] },
+    { splits: [{ recipient: otherRootAccount.address, amount: '2' }] },
+  ])('does not reuse an old grant after split terms change: %j', async ({ splits }) => {
+    const store = Store.memory()
+    const billing = createConfirmingBillingClient()
+    const { credential, mppx } = await activateConfirmedSubscription({
+      client: billing.client,
+      splits: subscriptionSplits,
+      store,
+    })
+    const request = new Request('https://example.com/resource')
+    expect((await mppx.tempo.subscription({ splits })(request)).status).toBe(402)
+    const oldGrant = new Request('https://example.com/resource', {
+      headers: { Authorization: Credential.serialize(credential) },
+    })
+    expect((await mppx.tempo.subscription({ splits })(oldGrant)).status).toBe(402)
+    expect(billing.broadcasts).toHaveLength(1)
+    expect((await SubscriptionStore.fromStore(store).getByKey(subscriptionKey))?.splits).toEqual(
+      storedSubscriptionSplits,
+    )
+  })
+
+  test('rejects a custom renewal that changes the stored split allocation', async () => {
+    const store = Store.memory()
+    const subscriptions = SubscriptionStore.fromStore(store)
+    await subscriptions.put(
+      createRecord({
+        billingAnchor: new Date(Date.now() - 3 * subscriptionPeriodMilliseconds).toISOString(),
+        splits: storedSubscriptionSplits,
+      }),
+    )
+    await expect(
+      renew({
+        store,
+        subscriptionId: 'sub_123',
+        renew: async ({ periodIndex, subscription }) => ({
+          receipt: createReceipt(subscription.subscriptionId, hashBackground),
+          subscription: {
+            ...subscription,
+            lastChargedPeriod: periodIndex,
+            reference: hashBackground,
+            splits: [{ recipient: platformRecipient, amount: '3000000' }],
+          },
+        }),
+      }),
+    ).rejects.toThrow('subscription record does not match request')
+    const record = await subscriptions.get('sub_123')
+    expect(record?.lastChargedPeriod).toBe(0)
+    expect(record?.splits).toEqual(storedSubscriptionSplits)
+  })
+
+  test('rejects a custom renewal that mutates split terms in place', async () => {
+    const store = Store.memory()
+    const subscriptions = SubscriptionStore.fromStore(store)
+    await subscriptions.put(
+      createRecord({
+        billingAnchor: new Date(Date.now() - 3 * subscriptionPeriodMilliseconds).toISOString(),
+        splits: storedSubscriptionSplits,
+      }),
+    )
+    await expect(
+      renew({
+        store,
+        subscriptionId: 'sub_123',
+        renew: async ({ periodIndex, subscription }) => {
+          // Exercise runtime mutation even when hook input is typed readonly.
+          Reflect.set(subscription.splits![0]!, 'amount', '3000000')
+          return {
+            receipt: createReceipt(subscription.subscriptionId, hashBackground),
+            subscription: {
+              ...subscription,
+              lastChargedPeriod: periodIndex,
+              reference: hashBackground,
+            },
+          }
+        },
+      }),
+    ).rejects.toThrow('subscription record does not match request')
+    const record = await subscriptions.get('sub_123')
+    expect(record?.lastChargedPeriod).toBe(0)
+    expect(record?.splits).toEqual(storedSubscriptionSplits)
+  })
+
+  test('rejects a custom activation that mutates approved split terms in place', async () => {
+    const store = Store.memory()
+    const billing = createConfirmingBillingClient()
+    await activateConfirmedSubscription({
+      client: billing.client,
+      expectedStatus: 402,
+      splits: subscriptionSplits,
+      store,
+      activate: async ({ request, resolved }) => {
+        Reflect.set(request.methodDetails!.splits![0]!, 'amount', '3000000')
+        const record = createRecord({
+          lookupKey: resolved.key,
+          splits: request.methodDetails!.splits,
+        })
+        return { receipt: createReceipt(record.subscriptionId), subscription: record }
+      },
+    })
+    expect(await SubscriptionStore.fromStore(store).getByKey(subscriptionKey)).toBeNull()
+  })
+
+  test('rejects optimistic split activation before signing or broadcasting', async () => {
+    const store = Store.memory()
+    const billing = createConfirmingBillingClient()
+    await activateConfirmedSubscription({
+      client: billing.client,
+      expectedStatus: 402,
+      splits: subscriptionSplits,
+      store,
+      waitForConfirmation: false,
+    })
+    expect(billing.callRequests).toHaveLength(0)
+    expect(billing.broadcasts).toHaveLength(0)
+    expect(await SubscriptionStore.fromStore(store).getByKey(subscriptionKey)).toBeNull()
+  })
+
+  test('rejects a held second split leg without marking the renewal paid', async () => {
+    const store = Store.memory()
+    const billing = createConfirmingBillingClient({
+      addUnrelatedTransfer: true,
+      redirectLeg: 1,
+      redirectTo: receivePolicyGuard,
+    })
+    const { mppx } = await activateConfirmedSubscription({
+      client: billing.client,
+      splits: subscriptionSplits,
+      store,
+    })
+    const record = await makeSubscriptionDue(store)
+    expect(
+      (await mppx.tempo.subscription({})(new Request('https://example.com/resource'))).status,
+    ).toBe(402)
+    expect(billing.broadcasts).toHaveLength(2)
+    expect(submittedTransfers(billing.broadcasts[1]!)).toEqual(expectedSplitTransfers)
+    const failed = await SubscriptionStore.fromStore(store).get(record.subscriptionId)
+    expect(failed?.lastChargedPeriod).toBe(0)
+    expect(failed?.reference).toBe(record.reference)
+  })
+
+  test('preflights both complete split envelopes for sponsored activation and renewal', async () => {
+    const store = Store.memory()
+    const billing = createConfirmingBillingClient({ account: rootAccount })
+    const { mppx } = await activateConfirmedSubscription({
+      client: billing.client,
+      feePayer: rootAccount,
+      splits: subscriptionSplits,
+      store,
+    })
+    const record = await makeSubscriptionDue(store)
+    expect(
+      await mppx.tempo.subscription.renew({ subscriptionId: record.subscriptionId }),
+    ).not.toBeNull()
+    expect(billing.callRequests).toHaveLength(4)
+    for (const [index, envelope] of billing.callRequests.entries()) {
+      const calls = envelope.calls as readonly { data: Hex; to: Address }[]
+      expect(submittedTransfers({ calls })).toEqual(expectedSplitTransfers)
+      if (index % 2 === 0) expect(envelope).not.toHaveProperty('feePayer')
+      else expect(envelope.feePayer).toBe(rootAccount.address)
+    }
+    expect(billing.broadcasts).toHaveLength(2)
+  })
+
+  test.each(['activation', 'renewal'] as const)(
+    'does not broadcast sponsored split %s after final simulation failure',
+    async (phase) => {
+      const store = Store.memory()
+      const billing = createConfirmingBillingClient({
+        account: rootAccount,
+        failSimulation: phase === 'activation' ? 2 : 4,
+      })
+      const { mppx } = await activateConfirmedSubscription({
+        client: billing.client,
+        expectedStatus: phase === 'activation' ? 402 : 200,
+        feePayer: rootAccount,
+        splits: subscriptionSplits,
+        store,
+      })
+      if (phase === 'renewal') {
+        const record = await makeSubscriptionDue(store)
+        await expect(
+          mppx.tempo.subscription.renew({ subscriptionId: record.subscriptionId }),
+        ).rejects.toThrow()
+        expect(
+          (await SubscriptionStore.fromStore(store).get(record.subscriptionId))?.lastChargedPeriod,
+        ).toBe(0)
+      } else {
+        expect(await SubscriptionStore.fromStore(store).getByKey(subscriptionKey)).toBeNull()
+      }
+      expect(billing.broadcasts).toHaveLength(phase === 'activation' ? 0 : 1)
+      expect(billing.callRequests.length).toBeGreaterThanOrEqual(phase === 'activation' ? 2 : 4)
+    },
+  )
 
   test('renews when the confirmed receipt credits the recipient', async () => {
     const store = Store.memory()
